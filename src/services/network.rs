@@ -7,7 +7,7 @@ pub struct Network;
 impl Network {
     /// List all network interfaces.
     #[command]
-    async fn list(&self) -> libnexus::Result<String> {
+    async fn list(&self) -> anyhow::Result<String> {
         Ok("eth0, eth1, lo".to_string())
     }
 
@@ -17,7 +17,7 @@ impl Network {
         &self,
         #[arg(hint = "interface", doc = "Network interface to inspect", complete = "network.list")]
         iface: String,
-    ) -> libnexus::Result<String> {
+    ) -> anyhow::Result<String> {
         Ok(format!("Interface '{}': ip=10.0.0.1, mask=255.255.255.0, state=UP", iface))
     }
 
@@ -31,7 +31,7 @@ impl Network {
         ip: String,
         #[arg(hint = "mask", doc = "Subnet mask (e.g. 255.255.255.0)")]
         mask: String,
-    ) -> libnexus::Result<String> {
+    ) -> anyhow::Result<String> {
         Ok(format!("Set {}/{} on interface '{}'", ip, mask, iface))
     }
 }
