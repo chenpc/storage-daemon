@@ -11,7 +11,7 @@ impl Volume {
         &self,
         #[arg(hint = "volume name", doc = "Name for the new volume")] name: String,
         #[arg(hint = "device", doc = "Block device to create the volume on", complete = "block.list")] disk: String,
-    ) -> anyhow::Result<String> {
+    ) -> libnexus::Result<String> {
         Ok(format!("Volume '{}' created on disk '{}'", name, disk))
     }
 
@@ -20,13 +20,13 @@ impl Volume {
     async fn delete(
         &self,
         #[arg(hint = "volume name", doc = "Volume to delete", complete = "volume.list")] name: String,
-    ) -> anyhow::Result<String> {
+    ) -> libnexus::Result<String> {
         Ok(format!("Volume '{}' deleted", name))
     }
 
     /// List all volumes.
     #[command]
-    async fn list(&self) -> anyhow::Result<String> {
+    async fn list(&self) -> libnexus::Result<String> {
         Ok("vol0, vol1, vol2".to_string())
     }
 }

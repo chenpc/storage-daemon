@@ -8,4 +8,3 @@ repository = "https://github.com/chenpc/storage-daemon"
 libnexus = { git = "https://github.com/chenpc/libnexus.git" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
-anyhow = "1"

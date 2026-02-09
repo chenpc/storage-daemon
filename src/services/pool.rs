@@ -7,13 +7,13 @@ pub struct Pool;
 impl Pool {
     /// Create a new storage pool.
     #[command]
-    async fn create(&self, #[arg(doc = "Name for the new pool")] name: String) -> anyhow::Result<String> {
+    async fn create(&self, #[arg(doc = "Name for the new pool")] name: String) -> libnexus::Result<String> {
         Ok(format!("Pool '{}' created", name))
     }
 
     /// Destroy a storage pool.
     #[command]
-    async fn destroy(&self, #[arg(doc = "Pool to destroy", complete = "pool.create")] name: String) -> anyhow::Result<String> {
+    async fn destroy(&self, #[arg(doc = "Pool to destroy", complete = "pool.create")] name: String) -> libnexus::Result<String> {
         Ok(format!("Pool '{}' destroyed", name))
     }
 }
