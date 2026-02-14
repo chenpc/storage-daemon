@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/chenpc/storage-daemon"
 
+[[bin]]
+name = "nexus-test"
+path = "src/test/core/main.rs"
+
 [dependencies]
 libnexus = { path = "../libnexus" }
 tokio = { version = "1", features = ["full"] }
