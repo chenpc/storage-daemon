@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/chenpc/storage-daemon"
 
+[workspace]
+
 [[bin]]
 name = "storage-daemon"
 path = "src/main.rs"
