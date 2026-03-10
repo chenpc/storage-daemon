@@ -3,7 +3,7 @@ use libnexus::NamedMap;
 use std::fs;
 use std::process::Command;
 
-const SHARES_DIR: &str = "/etc/samba/shares";
+const SMB_CONF: &str = "/etc/samba/smb.conf";
 
 #[derive(serde::Serialize)]
 struct VolumeInfo {
@@ -21,13 +21,61 @@ fn zfs(args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Ensure the shares directory exists.
-fn ensure_shares_dir() -> anyhow::Result<()> {
-    fs::create_dir_all(SHARES_DIR)?;
+/// Add a Samba share section directly to smb.conf if not already present.
+fn add_samba_share(name: &str, path: &str) -> anyhow::Result<()> {
+    let conf = fs::read_to_string(SMB_CONF).unwrap_or_default();
+    let section_header = format!("[{}]", name);
+
+    // Skip if share already exists
+    if conf.contains(&section_header) {
+        return Ok(());
+    }
+
+    // Append share section
+    let share_section = format!(
+        "\n[{}]\n   path = {}\n   browseable = yes\n   guest ok = yes\n   guest only = no\n   read only = no\n   writable = yes\n   create mask = 0664\n   directory mask = 0775\n",
+        name, path
+    );
+
+    fs::write(SMB_CONF, conf + &share_section)?;
+    reload_samba();
     Ok(())
 }
 
+/// Remove a Samba share section from smb.conf.
+fn remove_samba_share(name: &str) -> anyhow::Result<()> {
+    let conf = fs::read_to_string(SMB_CONF).unwrap_or_default();
+    let section_header = format!("[{}]", name);
+
+    let mut result = String::new();
+    let mut skip_section = false;
+
+    for line in conf.lines() {
+        if line.trim().starts_with('[') {
+            skip_section = line.trim() == section_header;
+        }
+        if !skip_section {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    fs::write(SMB_CONF, result)?;
+    reload_samba();
+    Ok(())
+}
+
+/// Send SIGHUP to smbd to reload configuration.
 fn reload_samba() {
+    // Try to read PID from standard location
+    if let Ok(pid_str) = fs::read_to_string("/run/samba/smbd.pid") {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            let _ = Command::new("kill").args(["-HUP", &pid.to_string()]).output();
+            return;
+        }
+    }
+
+    // Fallback: use smbcontrol
     let _ = Command::new("smbcontrol").args(["all", "reload-config"]).status();
 }
 
@@ -49,16 +97,11 @@ impl Volume {
         let mountpoint = format!("/mnt/pools/{}/{}", pool, name);
         zfs(&["create", "-o", &format!("mountpoint={}", mountpoint), &dataset])?;
 
-        // Ensure the mount directory exists
-        fs::create_dir_all(&mountpoint)?;
+        // Set directory permissions
+        Command::new("chmod").args(["755", &mountpoint]).output()?;
 
-        // Create Samba share configuration
-        let share_conf = format!(
-            "[{name}]\n   path = {mountpoint}\n   browseable = yes\n   guest ok = yes\n   guest only = no\n   read only = no\n   writable = yes\n   create mask = 0664\n   directory mask = 0775\n"
-        );
-        ensure_shares_dir()?;
-        fs::write(format!("{}/{}.conf", SHARES_DIR, name), share_conf)?;
-        reload_samba();
+        // Add Samba share
+        add_samba_share(&name, &mountpoint)?;
 
         Ok(format!("Volume '{}' created on pool '{}' and shared via Samba", name, pool))
     }
@@ -73,9 +116,7 @@ impl Volume {
 
         // Share name is the last component of the dataset path.
         let share_name = dataset.rsplit('/').next().unwrap_or(&dataset);
-        let conf_path = format!("{}/{}.conf", SHARES_DIR, share_name);
-        let _ = fs::remove_file(&conf_path);
-        reload_samba();
+        let _ = remove_samba_share(share_name);
 
         Ok(format!("Volume '{}' deleted", dataset))
     }
