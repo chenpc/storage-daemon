@@ -5,6 +5,10 @@ edition = "2021"
 repository = "https://github.com/chenpc/storage-daemon"
 
 [[bin]]
+name = "storage-daemon"
+path = "src/main.rs"
+
+[[bin]]
 name = "nexus-test"
 path = "src/test/core/main.rs"
 
