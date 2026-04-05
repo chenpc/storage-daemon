@@ -10,6 +10,7 @@ struct InterfaceInfo {
     mac: String,
     ipv4: String,
     ipv6: String,
+    gateway: String,
     rx_bytes: u64,
     tx_bytes: u64,
 }
@@ -53,7 +54,8 @@ fn parse_interfaces() -> NamedMap<InterfaceInfo> {
         }
 
         let (rx_bytes, tx_bytes) = read_iface_stats(&name);
-        result.insert(name, InterfaceInfo { state, mac, ipv4, ipv6, rx_bytes, tx_bytes });
+        let gateway = read_default_gateway(&name);
+        result.insert(name, InterfaceInfo { state, mac, ipv4, ipv6, gateway, rx_bytes, tx_bytes });
     }
     result
 }
@@ -71,6 +73,21 @@ fn read_iface_stats(name: &str) -> (u64, u64) {
         }
     }
     (0, 0)
+}
+
+fn read_default_gateway(iface: &str) -> String {
+    if let Ok(output) = Command::new("ip").args(["route", "show", "default", "dev", iface]).output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // "default via 10.0.2.2 dev eth0"
+        for part in stdout.split_whitespace() {
+            if part == "via" { continue; }
+            // The token after "via" is the gateway
+            if let Some(gw) = stdout.split("via ").nth(1) {
+                return gw.split_whitespace().next().unwrap_or("").to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 pub struct Network;
@@ -98,7 +115,7 @@ impl Network {
             .ok_or_else(|| anyhow::anyhow!("interface '{}' not found", iface))
     }
 
-    /// Set IP address on an interface (CIDR notation, e.g. 10.0.0.1/24).
+    /// Set IP address and default gateway on an interface.
     #[command]
     async fn setip(
         &self,
@@ -106,6 +123,8 @@ impl Network {
         iface: String,
         #[arg(hint = "ip/prefix", doc = "IP address in CIDR (e.g. 10.0.0.1/24)")]
         cidr: String,
+        #[arg(hint = "gateway", doc = "Default gateway (e.g. 10.0.0.1)")]
+        gateway: String,
     ) -> anyhow::Result<String> {
         // Flush existing addresses and add new one
         let _ = Command::new("ip").args(["addr", "flush", "dev", &iface]).output();
@@ -115,7 +134,20 @@ impl Network {
         if !output.status.success() {
             anyhow::bail!("ip addr add failed: {}", String::from_utf8_lossy(&output.stderr).trim());
         }
-        Ok(format!("Set {} on interface '{}'", cidr, iface))
+
+        // Set default gateway
+        if !gateway.is_empty() {
+            // Remove existing default route first
+            let _ = Command::new("ip").args(["route", "del", "default"]).output();
+            let gw_output = Command::new("ip")
+                .args(["route", "add", "default", "via", &gateway, "dev", &iface])
+                .output()?;
+            if !gw_output.status.success() {
+                anyhow::bail!("ip route add failed: {}", String::from_utf8_lossy(&gw_output.stderr).trim());
+            }
+        }
+
+        Ok(format!("Set {} gateway {} on interface '{}'", cidr, gateway, iface))
     }
 
     /// Get current hostname.
