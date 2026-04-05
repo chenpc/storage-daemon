@@ -1,5 +1,5 @@
 use libnexus::NexusServer;
-use storage_daemon::services::{block::Block, network::Network, pool::Pool, user::User, volume::Volume};
+use storage_daemon::services::{block::Block, network::Network, pool::Pool, system::System, user::User, volume::Volume};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -13,6 +13,7 @@ async fn main() -> anyhow::Result<()> {
         .register(Network)
         .register(Pool)
         .register(User)
+        .register(System)
         .serve(&addr)
         .await
 }

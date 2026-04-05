@@ -11,6 +11,22 @@ struct UserInfo {
     home: String,
 }
 
+/// Set or update the Samba password for a user (smbpasswd -a -s).
+fn set_smb_password(name: &str, password: &str) {
+    let input = format!("{}\n{}\n", password, password);
+    let _ = Command::new("smbpasswd")
+        .args(["-a", "-s", name])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(input.as_bytes())?;
+            }
+            child.wait()
+        });
+}
+
 pub struct User;
 
 /// Manage system users.
@@ -76,6 +92,9 @@ impl User {
             anyhow::bail!("chpasswd failed: {}", String::from_utf8_lossy(&output.stderr).trim());
         }
 
+        // Also set Samba password so the user can access SMB shares
+        set_smb_password(&name, &password);
+
         Ok(format!("User '{}' created", name))
     }
 
@@ -113,6 +132,9 @@ impl User {
         if !output.status.success() {
             anyhow::bail!("chpasswd failed: {}", String::from_utf8_lossy(&output.stderr).trim());
         }
+
+        // Also update Samba password
+        set_smb_password(&name, &password);
 
         Ok(format!("Password changed for user '{}'", name))
     }

@@ -1,5 +1,6 @@
 use libnexus::nexus_service;
 use libnexus::NamedMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::process::Command;
 
@@ -13,6 +14,11 @@ struct VolumeInfo {
     mountpoint: String,
 }
 
+#[derive(serde::Serialize)]
+struct PermissionInfo {
+    access: String,
+}
+
 fn zfs(args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("zfs").args(args).output()?;
     if !output.status.success() {
@@ -21,19 +27,19 @@ fn zfs(args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+// ── smb.conf helpers ──
+
 /// Add a Samba share section directly to smb.conf if not already present.
 fn add_samba_share(name: &str, path: &str) -> anyhow::Result<()> {
     let conf = fs::read_to_string(SMB_CONF).unwrap_or_default();
     let section_header = format!("[{}]", name);
 
-    // Skip if share already exists
     if conf.contains(&section_header) {
         return Ok(());
     }
 
-    // Append share section
     let share_section = format!(
-        "\n[{}]\n   path = {}\n   browseable = yes\n   guest ok = yes\n   guest only = no\n   read only = no\n   writable = yes\n   create mask = 0664\n   directory mask = 0775\n",
+        "\n[{}]\n   path = {}\n   browseable = yes\n   read only = yes\n   valid users =\n   write list =\n   create mask = 0664\n   directory mask = 0775\n",
         name, path
     );
 
@@ -65,18 +71,82 @@ fn remove_samba_share(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read a space-separated list value from a share section in smb.conf.
+fn read_share_key(share: &str, key: &str) -> Vec<String> {
+    let conf = fs::read_to_string(SMB_CONF).unwrap_or_default();
+    let section_header = format!("[{}]", share);
+    let mut in_section = false;
+
+    for line in conf.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = trimmed == section_header;
+            continue;
+        }
+        if in_section {
+            if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim() == key {
+                    return v.split_whitespace().map(str::to_string).collect();
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+/// Update a key's value within a specific share section of smb.conf.
+fn write_share_key(share: &str, key: &str, values: &[String]) -> anyhow::Result<()> {
+    let conf = fs::read_to_string(SMB_CONF).unwrap_or_default();
+    let section_header = format!("[{}]", share);
+    let new_value = values.join(" ");
+    let mut result = String::new();
+    let mut in_section = false;
+    let mut key_written = false;
+
+    for line in conf.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            // Leaving section without finding the key — insert it
+            if in_section && !key_written {
+                result.push_str(&format!("   {} = {}\n", key, new_value));
+                key_written = true;
+            }
+            in_section = trimmed == section_header;
+        }
+        if in_section {
+            if let Some((k, _)) = trimmed.split_once('=') {
+                if k.trim() == key {
+                    result.push_str(&format!("   {} = {}\n", key, new_value));
+                    key_written = true;
+                    continue;
+                }
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    // If we were in the section at EOF and didn't write the key
+    if in_section && !key_written {
+        result.push_str(&format!("   {} = {}\n", key, new_value));
+    }
+
+    fs::write(SMB_CONF, result)?;
+    Ok(())
+}
+
 /// Send SIGHUP to smbd to reload configuration.
 fn reload_samba() {
-    // Try to read PID from standard location
     if let Ok(pid_str) = fs::read_to_string("/run/samba/smbd.pid") {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             let _ = Command::new("kill").args(["-HUP", &pid.to_string()]).output();
             return;
         }
     }
-
-    // Fallback: use smbcontrol
     let _ = Command::new("smbcontrol").args(["all", "reload-config"]).status();
+}
+
+fn share_name_from_dataset(dataset: &str) -> String {
+    dataset.replace('/', "-")
 }
 
 pub struct Volume;
@@ -92,17 +162,10 @@ impl Volume {
         #[arg(hint = "pool", doc = "Pool to create the volume in", complete = "pool.list")] pool: String,
     ) -> anyhow::Result<String> {
         let dataset = format!("{}/{}", pool, name);
-
-        // Set mountpoint to /mnt/pools/{pool}/{name}
         let mountpoint = format!("/mnt/pools/{}/{}", pool, name);
         zfs(&["create", "-o", &format!("mountpoint={}", mountpoint), &dataset])?;
-
-        // Set directory permissions
-        Command::new("chmod").args(["755", &mountpoint]).output()?;
-
-        // Add Samba share
-        add_samba_share(&name, &mountpoint)?;
-
+        Command::new("chmod").args(["777", &mountpoint]).output()?;
+        add_samba_share(&share_name_from_dataset(&dataset), &mountpoint)?;
         Ok(format!("Volume '{}' created on pool '{}' and shared via Samba", name, pool))
     }
 
@@ -113,11 +176,7 @@ impl Volume {
         #[arg(hint = "pool/volume", doc = "Dataset to delete (pool/name)", complete = "volume.list")] dataset: String,
     ) -> anyhow::Result<String> {
         zfs(&["destroy", &dataset])?;
-
-        // Share name is the last component of the dataset path.
-        let share_name = dataset.rsplit('/').next().unwrap_or(&dataset);
-        let _ = remove_samba_share(share_name);
-
+        let _ = remove_samba_share(&share_name_from_dataset(&dataset));
         Ok(format!("Volume '{}' deleted", dataset))
     }
 
@@ -131,7 +190,6 @@ impl Volume {
                 let cols: Vec<&str> = line.split('\t').collect();
                 if cols.len() < 5 { return None; }
                 let name = cols[0];
-                // Skip top-level pool datasets (no slash).
                 if !name.contains('/') { return None; }
                 Some((name.to_string(), VolumeInfo {
                     used: cols[1].to_string(),
@@ -142,5 +200,92 @@ impl Volume {
             })
             .collect();
         Ok(vols)
+    }
+
+    /// Set a user's permission on a volume's Samba share (rw or ro).
+    #[command]
+    async fn permission(
+        &self,
+        #[arg(hint = "pool/volume", doc = "Dataset (pool/name)", complete = "volume.list")] dataset: String,
+        #[arg(hint = "username", doc = "User to grant access", complete = "user.list")] user: String,
+        #[arg(hint = "rw|ro", doc = "Access level: rw (read-write) or ro (read-only)")] access: String,
+    ) -> anyhow::Result<String> {
+        let valid_access = ["rw", "ro"];
+        if !valid_access.contains(&access.as_str()) {
+            anyhow::bail!("invalid access '{}' (expected: rw, ro)", access);
+        }
+
+        let share = share_name_from_dataset(&dataset);
+
+        let mut valid_users = read_share_key(&share, "valid users");
+        let mut write_list = read_share_key(&share, "write list");
+        let mut read_list = read_share_key(&share, "read list");
+
+        // Remove user from all lists first
+        valid_users.retain(|u| u != &user);
+        write_list.retain(|u| u != &user);
+        read_list.retain(|u| u != &user);
+
+        // Add to valid users
+        valid_users.push(user.clone());
+
+        if access == "rw" {
+            write_list.push(user.clone());
+        } else {
+            read_list.push(user.clone());
+        }
+
+        write_share_key(&share, "valid users", &valid_users)?;
+        write_share_key(&share, "write list", &write_list)?;
+        write_share_key(&share, "read list", &read_list)?;
+        reload_samba();
+
+        Ok(format!("User '{}' granted {} access to '{}'", user, access, dataset))
+    }
+
+    /// Remove a user's access from a volume's Samba share.
+    #[command]
+    async fn revoke(
+        &self,
+        #[arg(hint = "pool/volume", doc = "Dataset (pool/name)", complete = "volume.list")] dataset: String,
+        #[arg(hint = "username", doc = "User to revoke access", complete = "user.list")] user: String,
+    ) -> anyhow::Result<String> {
+        let share = share_name_from_dataset(&dataset);
+
+        let mut valid_users = read_share_key(&share, "valid users");
+        let mut write_list = read_share_key(&share, "write list");
+        let mut read_list = read_share_key(&share, "read list");
+
+        valid_users.retain(|u| u != &user);
+        write_list.retain(|u| u != &user);
+        read_list.retain(|u| u != &user);
+
+        write_share_key(&share, "valid users", &valid_users)?;
+        write_share_key(&share, "write list", &write_list)?;
+        write_share_key(&share, "read list", &read_list)?;
+        reload_samba();
+
+        Ok(format!("User '{}' access revoked from '{}'", user, dataset))
+    }
+
+    /// List permissions for a volume's Samba share.
+    #[command]
+    async fn permissions(
+        &self,
+        #[arg(hint = "pool/volume", doc = "Dataset (pool/name)", complete = "volume.list")] dataset: String,
+    ) -> anyhow::Result<NamedMap<PermissionInfo>> {
+        let share = share_name_from_dataset(&dataset);
+
+        let valid_users = read_share_key(&share, "valid users");
+        let write_list = read_share_key(&share, "write list");
+
+        let perms: BTreeMap<String, PermissionInfo> = valid_users
+            .into_iter()
+            .map(|u| {
+                let access = if write_list.contains(&u) { "rw" } else { "ro" }.to_string();
+                (u, PermissionInfo { access })
+            })
+            .collect();
+        Ok(perms)
     }
 }

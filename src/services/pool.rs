@@ -57,15 +57,28 @@ impl Pool {
         Ok(format!("Pool '{}' created", name))
     }
 
-    /// Destroy a storage pool.
+    /// Destroy a storage pool (automatically destroys all volumes first).
     #[command]
     async fn destroy(
         &self,
         #[arg(doc = "Pool to destroy", complete = "pool.list")] name: String,
     ) -> anyhow::Result<String> {
+        // List and destroy all child datasets first (deepest first)
+        let list_output = Command::new("zfs")
+            .args(["list", "-H", "-r", "-o", "name", "-S", "name", &name])
+            .output()?;
+        if list_output.status.success() {
+            let stdout = String::from_utf8_lossy(&list_output.stdout);
+            for dataset in stdout.lines() {
+                let dataset = dataset.trim();
+                // Skip the pool itself (will be destroyed by zpool destroy)
+                if dataset == name { continue; }
+                let _ = Command::new("zfs").args(["destroy", "-f", dataset]).output();
+            }
+        }
+
         let output = Command::new("zpool")
-            .arg("destroy")
-            .arg(&name)
+            .args(["destroy", "-f", &name])
             .output()?;
         if !output.status.success() {
             anyhow::bail!("zpool destroy failed: {}", String::from_utf8_lossy(&output.stderr).trim());
@@ -100,5 +113,28 @@ impl Pool {
             })
             .collect();
         Ok(pools)
+    }
+
+    /// List devices used by a pool.
+    #[command]
+    async fn devices(
+        &self,
+        #[arg(doc = "Pool name", complete = "pool.list")] name: String,
+    ) -> anyhow::Result<String> {
+        let output = Command::new("zpool")
+            .args(["status", "-P", &name])
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!("zpool status failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Extract /dev/vdX lines from zpool status output
+        let devs: Vec<&str> = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("/dev/"))
+            .map(|line| line.split_whitespace().next().unwrap_or(line))
+            .collect();
+        Ok(devs.join("\n"))
     }
 }
